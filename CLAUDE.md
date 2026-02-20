@@ -88,13 +88,18 @@ These are internal endpoints — they may change without notice:
 
 ### Site Architecture
 
-The site is a **Single Page Application (SPA)** powered by the **Aspira** platform
-(formerly CamIS). All booking views share the route `/create-booking/results` — map,
+The site is a **Single Page Application (SPA)** powered by **Camis Inc.**
+(Canadian company, acquired by Banyan Software). The frontend is **Angular** with a
+**.NET/C#** backend and **SQL Server** database. The same platform powers Parks Canada.
+
+All booking views share the route `/create-booking/results` — map,
 list, and calendar views are client-side toggles with the same URL. Availability data
 is loaded via JS `fetch()` calls after page load, not server-rendered in HTML.
 
 The site returns **403 to direct HTTP requests** — it requires JavaScript execution
-to pass a cookie/challenge gate. This is why the Playwright approach is needed.
+to obtain a session cookie. There is no CAPTCHA, no commercial WAF (Cloudflare/Akamai),
+and no Queue-it waiting room (unlike Parks Canada which uses the same Camis platform).
+Once a browser bootstraps the page, API calls work freely.
 
 ### ID Hierarchy
 
@@ -136,7 +141,7 @@ https://reservations.ontarioparks.ca/create-booking/results?
 - Direct HTTP requests return 403 — browser automation (Playwright) or the browser console script are required.
 - Browser console script works within the site's origin, avoiding CORS/cookie issues.
 - Rate limiting may apply — avoid hammering the API.
-- The site uses Queue-it virtual waiting rooms during peak reservation periods.
+- Parks Canada (same Camis platform) uses Queue-it waiting rooms; Ontario Parks does not currently, but this could change.
 
 ## Dependencies
 
