@@ -1,410 +1,460 @@
-# Discovering Website Structure for Smart Navigation & Data Extraction
+# Site Structure Discovery Skill
 
-A reusable methodology for reverse-engineering any web application's architecture,
-navigation model, ID system, and API surface — to build automated data extraction
-scripts.
+> **Purpose:** A reusable AI prompt/skill for reverse-engineering any web application's
+> navigation model, ID system, and API surface — then building automated discovery and
+> data extraction scripts.
+>
+> **How to use:** Copy this entire document into a new conversation as context, then
+> provide the target URL and what data you want to extract.
+
+---
+
+## Instructions
+
+You are a web application reverse-engineering specialist. Your task is to analyze a
+target website, map its complete navigation structure and API surface, and produce:
+
+1. A **site_structure.json** — cached hierarchy of all discoverable entity IDs
+2. A **discovery script** — run once to populate the JSON cache
+3. An **extraction script** — run repeatedly using cached IDs for fast data retrieval
+4. A **findings report** — documenting every endpoint, ID format, and dependency
+
+Work through the phases below in order. At each phase, document your findings before
+proceeding.
 
 ---
 
 ## Phase 1: Passive Reconnaissance
 
-### 1.1 Technology Stack Identification
+### 1.1 Identify the Technology Stack
 
-Before touching the site, identify what you're dealing with.
+Before writing any code, determine what you're working with:
 
-**Tools:**
-- BuiltWith (builtwith.com) or Wappalyzer browser extension
-- Browser DevTools → Sources tab (look at JS bundle names)
-- `curl -sI <url>` to inspect response headers (`X-Powered-By`, `Server`, etc.)
+**Check these layers:**
 
-**What to identify:**
-
-| Layer | Look For | Why It Matters |
-|-------|----------|---------------|
-| Frontend framework | Angular, React, Vue, Next.js, Nuxt | Determines how routing/state works |
-| Backend framework | .NET, Django, Rails, Express, Spring | Predicts API patterns |
-| CSS framework | Bootstrap, Tailwind, Material | Helps with DOM selectors |
-| CDN/WAF | Cloudflare, Akamai, AWS CloudFront | Determines bot-detection difficulty |
-| Anti-bot | reCAPTCHA, hCaptcha, Datadome, PerimeterX | May require browser automation |
-| Auth | JWT, session cookies, OAuth | Affects how to maintain sessions |
+| Layer | What to Look For | Why It Matters |
+|-------|-----------------|---------------|
+| Frontend | Angular, React, Vue, Next.js, Nuxt, Svelte | Determines routing, state management, API call patterns |
+| Backend | .NET, Django, Rails, Express, Spring, Laravel | Predicts API URL conventions and response formats |
+| Database hints | ID formats (auto-increment, UUID, negative ints, slugs) | Reveals entity relationships |
+| CDN/WAF | Cloudflare, Akamai, AWS CloudFront, Fastly | Determines if direct HTTP works or browser is needed |
+| Anti-bot | reCAPTCHA, hCaptcha, Datadome, PerimeterX, Queue-it | Determines automation difficulty |
+| Auth model | JWT, session cookies, OAuth, API keys | Affects how sessions must be maintained |
 
 **Framework detection shortcuts:**
 ```
-Angular:    <app-root>, ng-version attribute, zone.js in network, /assets/
-React:      <div id="root">, __REACT_DEVTOOLS, _reactRootContainer, .chunk.js
-Vue:        <div id="app">, __vue__, .vue files in sources
-Next.js:    __NEXT_DATA__ script tag, /_next/ paths
-Nuxt:       __NUXT__, /_nuxt/ paths
+Angular:     <app-root>, ng-version attribute, zone.js in network
+React:       <div id="root">, __REACT_DEVTOOLS, _reactRootContainer, .chunk.js
+Vue:         <div id="app">, __vue__, .vue files in sources
+Next.js:     __NEXT_DATA__ script tag, /_next/ paths
+Nuxt:        __NUXT__, /_nuxt/ paths
+Svelte:      __svelte, .svelte-* classes
+Remix:       __remixContext, /build/ paths
 ```
 
-### 1.2 URL Structure Analysis
+**Deliverable:** A one-paragraph tech stack summary.
 
-Navigate the site manually and record every URL transition. This is the single most
-valuable step.
+### 1.2 Map URL Transitions
 
-**Record this table for every page transition:**
+Navigate the site manually from the landing page through every level of hierarchy to
+the deepest leaf entity. Record **every URL change** in this table format:
 
-| Step | Action | URL | What Changed | New Parameters |
-|------|--------|-----|-------------|----------------|
+| Step | User Action | Full URL | Route Changed? | Parameters Added/Changed |
+|------|------------|----------|---------------|-------------------------|
 | 1 | Landed on home | /home | — | — |
-| 2 | Selected category | /results?catId=5 | Route changed | catId added |
-| 3 | Drilled into item | /results?catId=5&itemId=99 | Same route | itemId added |
-| 4 | Changed view | /results?catId=5&itemId=99 | Nothing! | Client-side only |
+| 2 | Selected category | /results?catId=5 | Yes | catId |
+| 3 | Drilled into subcategory | /results?catId=5&subId=99 | No (same route) | subId added |
+| 4 | Toggled view (map/list) | /results?catId=5&subId=99 | No | No (client-side only) |
+| 5 | Selected leaf item | /detail?itemId=42 | Yes | catId gone, itemId added |
 
-**Key questions to answer:**
-- Does the route change, or only the query parameters? (SPA vs MPA)
-- Which parameters are added/changed at each navigation step?
-- Which parameters stay constant throughout? (session/context IDs)
-- Are there parameters that are derived (e.g., `nights = endDate - startDate`)?
-- What format are IDs in? (integers, UUIDs, slugs, negative ints, etc.)
+**Answer these questions from the table:**
+- Is this a Single Page Application (same route, different params) or Multi-Page (route changes)?
+- Which parameters accumulate as you drill deeper?
+- Which parameters are session/context IDs that persist across navigations?
+- Which parameters are derived (e.g., `nights = endDate - startDate`)?
+- What format are entity IDs? (positive ints, negative ints, UUIDs, slugs, encoded strings)
 
-### 1.3 ID Hierarchy Mapping
+**Deliverable:** The completed URL transition table and answers to each question.
 
-Most data-driven sites have a tree of entity IDs. Map it:
+### 1.3 Map the ID Hierarchy
+
+Every data-driven site has a tree of entity IDs. Draw it:
 
 ```
-Root Entity (e.g., Organization)
-└─ Category (e.g., Region/Park)
-   └─ Sub-category (e.g., Campground/Section)
-      └─ Leaf item (e.g., Site/Product/Room)
+Level 0: Root Entity
+  └─ Level 1: Category (parameter: ?)
+     └─ Level 2: Sub-category (parameter: ?)
+        └─ Level 3: Leaf item (parameter: ?)
 ```
 
-For each level, record:
-- The parameter name that holds the ID (e.g., `resourceLocationId`, `mapId`)
+For **each level**, record:
+- The URL parameter name that holds the ID
 - Which API endpoint returns the children at the next level
-- Whether the ID is in the URL, a cookie, or a JS variable
+- Whether the ID lives in the URL, a cookie, localStorage, or a JS variable
+- Whether the same parameter name is reused at different levels (common in SPAs)
+
+**Deliverable:** The hierarchy tree with parameter names and API endpoints at each level.
 
 ---
 
 ## Phase 2: Active Network Inspection
 
-### 2.1 Intercept API Calls
+### 2.1 Capture All API Calls
 
-Open DevTools → Network tab → filter by `Fetch/XHR`. Navigate through the site and
-record every API call.
-
-**For each API call, document:**
+Open DevTools → Network tab → filter by `Fetch/XHR`. Clear the log, then navigate
+through the **complete hierarchy** from root to leaf. For every API call, document:
 
 ```
-Endpoint:    GET /api/resources?parentId={id}
-Trigger:     Page load / User click on "X" / Scroll to bottom
-Request:     Headers (auth tokens?), Query params, Body (if POST)
-Response:    JSON structure, Key fields, Pagination format
-Depends on:  Must have {parentId} from previous /api/parents call
+Endpoint:     GET|POST /api/path?params
+Trigger:      What user action or page load event caused this call
+Auth:         Cookie | Bearer token | API key | None
+Request:      Query params and/or POST body (note required vs optional fields)
+Response:     JSON structure (key field names, nesting, array vs object)
+Pagination:   None | offset/limit | cursor | page number
+Depends on:   Which prior API call provides the IDs needed for this call
 ```
 
-**Build an API dependency graph:**
+### 2.2 Build the API Dependency Graph
+
+This is the most important deliverable. Draw the chain:
 
 ```
-/api/parks              → returns [{id, name, mapId, ...}]
-  ↓ uses park.id
-/api/campgrounds?parkId → returns [{id, name, mapId, ...}]
-  ↓ uses campground.mapId
-/api/sites?mapId        → returns [{id, name, attributes, ...}]
-  ↓ uses site.id
-/api/availability?siteId&startDate&endDate → returns {status}
+/api/endpoint-A               → returns [{id, name, childRef, ...}]
+  ↓ uses item.childRef
+/api/endpoint-B?ref={childRef} → returns [{id, name, leafRef, ...}]
+  ↓ uses item.leafRef
+/api/endpoint-C?ref={leafRef}  → returns [{id, name, data, ...}]
+  ↓ uses item.id
+/api/endpoint-D?id={id}&date=X → returns {status, availability, price, ...}
 ```
 
-### 2.2 Identify the "Bootstrap" Calls
+Mark which endpoints are:
+- **Bootstrap** (called on first page load, return bulk/config data)
+- **Navigation** (called when drilling into hierarchy levels)
+- **Data** (called to fetch the actual target data: availability, prices, etc.)
 
-When the SPA first loads, it makes initialization calls. These are gold — they often
-return bulk data (all parks, all categories, config, feature flags).
+### 2.3 Identify Bootstrap / Bulk Data Calls
 
-**Common bootstrap patterns:**
-- `/api/config` or `/api/init` — site-wide configuration
-- `/api/resources/root` or `/api/locations/all` — top-level entity list
-- `/api/attributes` or `/api/filters` — filter/facet definitions
-- A large JSON blob in a `<script>` tag (e.g., `window.__INITIAL_STATE__`)
+When the SPA first loads, it often makes initialization calls that return large
+datasets. These are extremely valuable — they may give you all root-level IDs in
+a single call.
 
-### 2.3 POST Body Analysis
+**Common patterns to look for:**
+- `/api/config`, `/api/init`, `/api/bootstrap` — site configuration
+- `/api/locations`, `/api/categories`, `/api/resources/all` — entity lists
+- `/api/attributes`, `/api/filters`, `/api/facets` — filter definitions
+- A `<script>` tag containing `window.__INITIAL_STATE__` or `window.__DATA__`
+- A `__NEXT_DATA__` or `__NUXT__` script tag (framework-specific pre-fetch)
 
-For POST endpoints (especially map/search), capture the request body:
+### 2.4 Analyze POST Bodies
 
-```json
-{
-  "mapId": -2147483419,
-  "bookingCategoryId": 0,
-  "startDate": "2026-07-26",
-  "endDate": "2026-08-01",
-  "getDailyAvailability": false,
-  "isReserving": true,
-  "filterData": {},
-  "bopiPartySize": 2
-}
-```
+For POST endpoints, capture the full request body. Test which fields are required
+by removing them one at a time. Document the **minimal viable request**.
 
-Note which fields are required vs optional. Try removing fields one at a time to find
-the minimal request.
+**Deliverable:** Complete API dependency graph with all endpoints documented.
 
 ---
 
-## Phase 3: Browser Automation Strategy
+## Phase 3: Determine Automation Strategy
 
-### 3.1 Choose Your Approach
+Based on Phase 1-2 findings, choose the right approach:
 
-| Approach | When to Use | Pros | Cons |
-|----------|-------------|------|------|
-| **Direct HTTP** (requests/httpx) | No JS challenge, no cookies needed | Fast, low resource | Blocked by WAF/SPA |
-| **Headless browser** (Playwright) | JS challenge, cookies, SPA rendering | Bypasses all protections | Slower, needs Chromium |
-| **Hybrid**: browser bootstraps, then HTTP | Initial cookie gate, then clean API | Fast after bootstrap | More complex |
-| **Browser extension** | Need to run within user's session | Full access, no CORS | Manual, not scriptable |
+| Approach | When to Use | Trade-offs |
+|----------|-------------|------------|
+| **Direct HTTP** (requests, httpx, curl) | No JS challenge, API returns data to unauthenticated requests | Fastest, simplest. Breaks if WAF/cookies required. |
+| **Headless browser** (Playwright, Puppeteer) | JS challenge, cookie gates, SPA-only rendering | Reliable but slower. Needs Chromium installed. |
+| **Hybrid** — browser bootstraps session, then switch to direct HTTP | Initial JS challenge but API works once cookies are set | Fast after first page load. More complex code. |
+| **In-page JS execution** (page.evaluate) | Need to call APIs from the site's origin context | No CORS issues, uses site's own session. Best for bulk extraction. |
+| **Browser console script** | Manual one-off extraction from a logged-in session | Zero setup. Not automatable. Good for prototyping. |
 
-### 3.2 Playwright Network Interception Pattern
-
-This is the most reliable pattern for SPAs. The browser handles all auth/cookies/JS
-challenges, and you simply listen to the API responses.
-
-```python
-from playwright.sync_api import sync_playwright
-
-class ApiCapture:
-    def __init__(self):
-        self.responses = {}
-
-    def handle_response(self, response):
-        if "/api/" in response.url and response.status == 200:
-            try:
-                self.responses[response.url] = response.json()
-            except:
-                pass
-
-with sync_playwright() as pw:
-    browser = pw.chromium.launch(headless=True)
-    context = browser.new_context()
-    capture = ApiCapture()
-    page = context.new_page()
-    page.on("response", capture.handle_response)
-
-    # Navigate — the SPA will make API calls, we capture them all
-    page.goto("https://example.com/search?category=5")
-    page.wait_for_timeout(5000)
-
-    # Now capture.responses has all the API data
-    for url, data in capture.responses.items():
-        print(f"{url}: {len(str(data))} bytes")
+**Decision test:**
+```bash
+# Test if direct HTTP works:
+curl -s -o /dev/null -w "%{http_code}" "https://target-site.com/api/bootstrap-endpoint"
+# 200 = direct HTTP works
+# 403/401/redirect = need browser automation
 ```
 
-### 3.3 In-Page JavaScript Execution
+### Recommended Architecture: page.evaluate()
 
-Once the browser has a valid session, you can make API calls directly from within the
-page context — no CORS, no cookie issues:
+For most SPAs, the best pattern is:
+
+1. **Playwright** launches a browser and navigates to the site (handles JS challenges)
+2. Once the page is loaded, use **page.evaluate()** to run `fetch()` calls from
+   within the page's JavaScript context
+3. This gives you the site's own cookies, headers, and origin — no CORS, no session issues
 
 ```python
+# Generic pattern — adapt endpoints and parameters to target site
 result = page.evaluate("""async ([endpoint, params]) => {
     const url = new URL(endpoint, window.location.origin);
     Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
     const resp = await fetch(url);
     return await resp.json();
-}""", ["/api/availability/status", {"resourceId": "123", "startDate": "2026-07-01"}])
+}""", ["/api/target-endpoint", {"id": "123", "date": "2026-01-01"}])
 ```
 
-This is the **most powerful technique** — it runs fetch() from the site's own origin
-with the site's own cookies and headers. It's exactly what the browser console scripts
-do, but automated.
-
-### 3.4 Cookie/Session Extraction for Hybrid Approach
-
-If you want speed after the initial browser bootstrap:
-
-```python
-# After browser loads the page and passes any JS challenges:
-cookies = context.cookies()
-# Transfer cookies to a requests session:
-import requests
-session = requests.Session()
-for cookie in cookies:
-    session.cookies.set(cookie["name"], cookie["value"], domain=cookie["domain"])
-# Now use session for fast direct HTTP calls
-resp = session.get("https://example.com/api/data")
-```
+**Deliverable:** Chosen approach with justification based on findings.
 
 ---
 
-## Phase 4: Full Hierarchy Extraction
+## Phase 4: Build the Discovery Script
 
-### 4.1 Recursive Discovery Pattern
+### 4.1 Script Requirements
 
-For tree-structured data (parks → campgrounds → sites), use a breadth-first crawl:
+The discovery script must:
+- Launch a browser (headed mode available for debugging)
+- Navigate to the site to establish a valid session
+- Walk the full hierarchy: root → category → subcategory → leaf
+- Extract all entity IDs, names, and parent-child relationships
+- Save everything to `site_structure.json`
+- Support filtering (discover one branch vs. the whole tree)
+- Use polite rate limiting (random 0.3–1.5s delays between API calls)
+
+### 4.2 Output Format: site_structure.json
+
+The JSON must be self-documenting and contain everything needed by the extraction
+script:
+
+```json
+{
+  "discovered_at": "ISO-8601 timestamp",
+  "site_url": "https://target-site.com",
+  "total_root_entities": 150,
+  "entities": [
+    {
+      "name": "Entity Name",
+      "id": "unique-id",
+      "level": 0,
+      "url_params": {
+        "paramName1": "value1",
+        "paramName2": "value2"
+      },
+      "children": [
+        {
+          "name": "Child Name",
+          "id": "child-id",
+          "level": 1,
+          "url_params": {
+            "paramName3": "value3"
+          },
+          "children": [
+            {
+              "name": "Leaf Name",
+              "id": "leaf-id",
+              "level": 2
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+Key principles:
+- Store **all IDs and parameter values** needed to construct direct URLs
+- Use the same field names the API uses (don't rename/transform)
+- Include discovery timestamp so you know how stale the cache is
+- Support incremental updates (merge new discoveries into existing file)
+
+### 4.3 Breadth-First Discovery Pattern
 
 ```python
-def discover_hierarchy(page):
-    """Discover the full entity hierarchy via API interception."""
+def discover_hierarchy(page, root_endpoint, child_endpoint_template):
+    """
+    Generic breadth-first hierarchy discovery.
 
+    Args:
+        page: Playwright page with valid session
+        root_endpoint: API path that returns all root entities
+        child_endpoint_template: f-string with {parent_id} placeholder
+    """
     # Level 0: Get all root entities
-    roots = page.evaluate("() => fetch('/api/roots').then(r => r.json())")
+    roots = page.evaluate(
+        "async (ep) => { const r = await fetch(ep); return r.json(); }",
+        root_endpoint
+    )
 
-    hierarchy = {}
+    hierarchy = []
     for root in roots:
-        hierarchy[root["id"]] = {
-            "name": root["name"],
-            "meta": root,
-            "children": {}
-        }
+        root_entry = extract_entity(root)  # Adapt to actual response shape
+        root_entry["children"] = []
 
-        # Level 1: Get children for each root
+        # Level 1+: Get children recursively
+        child_ep = child_endpoint_template.format(parent_id=root_entry["id"])
         children = page.evaluate(
-            "([id]) => fetch(`/api/children?parentId=${id}`).then(r => r.json())",
-            [root["id"]]
+            "async (ep) => { const r = await fetch(ep); return r.json(); }",
+            child_ep
         )
 
         for child in children:
-            hierarchy[root["id"]]["children"][child["id"]] = {
-                "name": child["name"],
-                "meta": child,
-                "children": {}  # Level 2 if needed
-            }
+            child_entry = extract_entity(child)
+            root_entry["children"].append(child_entry)
+            polite_delay()  # 0.3-1.5s random delay
+
+        hierarchy.append(root_entry)
+        polite_delay()
 
     return hierarchy
 ```
 
-### 4.2 Output: Site Structure JSON
-
-Save the discovered hierarchy as a structured JSON file for reuse:
-
-```json
-{
-  "discovered_at": "2026-02-20T12:00:00Z",
-  "site_url": "https://example.com",
-  "hierarchy": {
-    "-2147483600": {
-      "name": "Killbear Provincial Park",
-      "transactionLocationId": -2147483596,
-      "resourceLocationId": -2147483600,
-      "mapId": -2147483428,
-      "campgrounds": {
-        "-2147483419": {
-          "name": "Lighthouse Point B",
-          "mapId": -2147483419,
-          "sites": {
-            "1422": {"name": "1422"},
-            "1423": {"name": "1423"}
-          }
-        }
-      }
-    }
-  }
-}
-```
-
-### 4.3 Rate Limiting and Politeness
-
-When crawling all entities:
+### 4.4 Rate Limiting
 
 ```python
-import time
-import random
+import time, random
 
-def polite_delay(min_seconds=0.5, max_seconds=1.5):
-    """Random delay to avoid hammering the server."""
-    time.sleep(random.uniform(min_seconds, max_seconds))
+def polite_delay(min_s=0.3, max_s=1.5):
+    """Random delay between API calls to avoid hammering the server."""
+    time.sleep(random.uniform(min_s, max_s))
 ```
 
 Rules:
-- Add random delays between API calls (0.5–1.5 seconds)
-- Don't parallelize aggressively — 1 request at a time for discovery
-- Cache aggressively — park/campground IDs rarely change
-- Run discovery once, store results, reuse for availability checks
+- Always add random delays between API calls
+- Single-threaded discovery (don't parallelize)
+- Cache aggressively — entity IDs rarely change
+- Support `--headed` flag for visual debugging
+
+**Deliverable:** Working discovery script with CLI flags for `--headed`, entity
+filtering, and `--include-children` depth control.
 
 ---
 
-## Phase 5: Building the Navigation Script
+## Phase 5: Build the Extraction Script
 
-### 5.1 Two-Script Architecture
+### 5.1 Script Requirements
 
-**Script 1: Discovery (run once/rarely)**
-- Launches browser
-- Navigates site hierarchy
-- Extracts all entity IDs
-- Saves to `site_structure.json`
-
-**Script 2: Data extraction (run frequently)**
-- Loads `site_structure.json`
-- Launches browser, navigates directly to target entities using known IDs
-- Extracts the dynamic data (availability, prices, etc.)
-- No discovery overhead
+The extraction script must:
+- Load `site_structure.json` — fail clearly if missing with instructions to run discovery
+- Accept CLI arguments for which entity to query and what parameters (e.g., date range)
+- Construct direct URLs from cached IDs (skip all UI navigation)
+- Use `page.evaluate()` for batch API calls from within the browser context
+- Output results as formatted text (default) or JSON (`--json` flag)
+- Support `--headed` mode for debugging
 
 ### 5.2 Direct URL Construction
 
-Once you have IDs, skip all UI navigation. Construct URLs directly:
+Once you have cached IDs, skip all UI interaction. Build URLs directly:
 
 ```python
-def build_url(ids, params):
-    """Construct a direct URL to any page using known IDs."""
-    base = "https://example.com/results"
-    query = urlencode({**ids, **params})
-    return f"{base}?{query}"
+from urllib.parse import urlencode
 
-# Jump straight to Lighthouse Point B with dates:
-url = build_url(
-    ids={"locationId": -2147483600, "mapId": -2147483419},
-    params={"startDate": "2026-07-26", "endDate": "2026-08-01"}
-)
+def build_direct_url(base_url, cached_entity, extra_params):
+    """Construct a URL that jumps straight to a specific entity."""
+    params = {**cached_entity["url_params"], **extra_params}
+    return f"{base_url}/results?{urlencode(params)}"
 ```
 
-### 5.3 page.evaluate() for Bulk Data Extraction
+### 5.3 Batch Data Extraction via page.evaluate()
 
-The fastest approach for checking many items: run JavaScript directly in the page
-context in a loop:
+For checking many leaf entities, batch the API calls inside the browser:
 
 ```python
-results = page.evaluate("""async (siteIds, startDate, endDate) => {
+results = page.evaluate("""async ([entityIds, extraParams]) => {
     const results = {};
-    for (const id of siteIds) {
+    for (const id of entityIds) {
         try {
-            const resp = await fetch(
-                `/api/availability?resourceId=${id}&startDate=${startDate}&endDate=${endDate}`
-            );
+            const url = `/api/data?entityId=${id}&` + new URLSearchParams(extraParams);
+            const resp = await fetch(url);
             results[id] = await resp.json();
         } catch (e) {
-            results[id] = {error: e.message};
+            results[id] = { error: e.message };
         }
-        // Small delay to be polite
-        await new Promise(r => setTimeout(r, 200));
+        await new Promise(r => setTimeout(r, 200));  // polite delay
     }
     return results;
-}""", [site_ids, "2026-07-26", "2026-08-01"])
+}""", [entity_ids, {"date": "2026-07-01"}])
 ```
 
-This runs all requests from within the browser — no CORS, no extra sessions, no
-cookie management.
+### 5.4 Output Formatting
+
+Provide two output modes:
+- **Human-readable** (default): Table or summary with key findings highlighted
+- **JSON** (`--json` flag): Machine-readable output for piping to other tools
+
+**Deliverable:** Working extraction script that reads the cache and fetches target data.
+
+---
+
+## Phase 6: Documentation
+
+### 6.1 Update Project README / CLAUDE.md
+
+Document:
+- The two-step workflow (discover once → extract repeatedly)
+- All CLI flags for both scripts
+- The site's ID hierarchy with real examples
+- Known limitations and failure modes
+
+### 6.2 Findings Report
+
+Produce a brief report covering:
+- Tech stack identified
+- Full API dependency graph
+- ID hierarchy with real ID examples
+- Which automation approach was chosen and why
+- Any anti-bot measures encountered
+- Rate limiting observations
 
 ---
 
 ## Appendix: Checklist
 
-Use this checklist for any new site:
+Use this for any new target site:
 
-- [ ] **Identify the tech stack** (framework, backend, WAF)
-- [ ] **Map all URL transitions** (record parameter changes at each step)
-- [ ] **Map the ID hierarchy** (root → category → subcategory → leaf)
-- [ ] **Capture all API endpoints** (DevTools Network tab during full navigation)
-- [ ] **Build the API dependency graph** (which call needs data from which prior call)
-- [ ] **Identify bootstrap calls** (bulk data loaded on first page load)
-- [ ] **Test direct HTTP** (does `curl` or `requests` work, or do you need a browser?)
-- [ ] **Choose automation approach** (direct HTTP, headless browser, or hybrid)
-- [ ] **Build discovery script** (extract all IDs, save to JSON)
-- [ ] **Build extraction script** (use cached IDs, direct URL construction, page.evaluate)
-- [ ] **Add rate limiting** (random delays, single-threaded discovery)
-- [ ] **Test headed first** (use `--headed` flag to watch and debug)
+- [ ] Identify the tech stack (frontend framework, backend, WAF, anti-bot)
+- [ ] Map all URL transitions from root to leaf entity
+- [ ] Map the ID hierarchy (parameter names at each level)
+- [ ] Capture all API endpoints (DevTools Network tab)
+- [ ] Build the API dependency graph (which call feeds which)
+- [ ] Identify bootstrap/bulk data calls
+- [ ] Test direct HTTP (`curl` the endpoints — 200 or 403?)
+- [ ] Choose automation approach (direct HTTP / headless browser / hybrid)
+- [ ] Build discovery script (extract all IDs → site_structure.json)
+- [ ] Build extraction script (read cache → fetch target data)
+- [ ] Add rate limiting (random delays, single-threaded)
+- [ ] Test in headed mode first (`--headed` flag)
+- [ ] Document the workflow and API surface
 
 ---
 
-## Appendix: Common SPA Patterns
+## Appendix: Common Patterns by Framework
 
 ### Angular SPAs
-- Routes defined in `app-routing.module.ts`
-- API calls typically via `HttpClient` in services
-- State often in NgRx store — look for `/ngrx/` in bundles
-- Interceptors handle auth headers automatically
+- Routes in `app-routing.module.ts`, often use query params not path segments
+- API calls via `HttpClient` in `*.service.ts` files
+- State in NgRx store — look for `/ngrx/` or `@ngrx` in bundles
+- HTTP interceptors auto-attach auth headers
+- API paths typically `/api/{controller}/{action}`
 
 ### React SPAs
-- Look for React Router (`/react-router/` in bundles)
-- State in Redux, Zustand, or React Query
-- API calls via axios or fetch in hooks/effects
-- `__NEXT_DATA__` script tag if Next.js (contains pre-fetched data)
+- React Router: path-based routing (`/category/:id/item/:itemId`)
+- State in Redux (`__REDUX_DEVTOOLS__`), Zustand, React Query, or SWR
+- API calls via axios or fetch in hooks/effects (`useEffect`, `useQuery`)
+- Next.js: `__NEXT_DATA__` script tag contains server-side fetched data
+- Remix: `__remixContext` contains loader data
 
-### .NET + Angular (e.g., Camis / Ontario Parks pattern)
-- API routes follow `/api/{controller}/{action}` convention
-- IDs often use C# `int` (32-bit signed, explains negative IDs)
-- Endpoints return `camelCase` JSON by default
-- Look for `/api/resourcelocation/`, `/api/availability/` patterns
+### Vue / Nuxt SPAs
+- Vue Router: hash mode (`/#/path`) or history mode (`/path`)
+- State in Vuex or Pinia
+- `__NUXT__` script tag contains SSR-hydrated data
+- API calls in `asyncData()` or `useFetch()` composables
+
+### .NET Backend APIs
+- URL pattern: `/api/{ControllerName}/{ActionName}`
+- IDs often use C# `int` (32-bit signed — explains negative integer IDs)
+- Responses default to `camelCase` JSON (via System.Text.Json or Newtonsoft)
+- OData endpoints may expose `$filter`, `$select`, `$expand` query params
+- Entity Framework may leak DB column names in JSON keys
+
+### Django / DRF Backend APIs
+- URL pattern: `/api/v1/{resource}/` (trailing slash!)
+- DRF responses include `count`, `next`, `previous`, `results` for pagination
+- IDs typically auto-increment positive integers
+- May use `?format=json` query param
+
+### Rails Backend APIs
+- URL pattern: `/api/v1/{resources}/{id}` (plural nouns)
+- Responses often nested under a root key: `{"users": [...]}`
+- IDs are auto-increment positive integers
+- May use `.json` extension instead of Accept header
