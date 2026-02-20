@@ -2,40 +2,45 @@
 """
 Ontario Parks Campground Availability Checker — Playwright Edition
 
-Uses a real browser (headed or headless) to navigate the Ontario Parks
-reservation site, intercept API responses, and extract availability data.
-This bypasses the 403 / cookie / JS-challenge issues that block plain HTTP
-requests.
+Uses a real browser (headed or headless) to check campsite availability.
+Reads cached park/campground/site IDs from site_structure.json (created by
+discover_site.py) to skip discovery and navigate directly.
+
+If site_structure.json is missing, falls back to live discovery.
 
 Requirements:
     pip install playwright
     playwright install chromium
 
+Setup (run once):
+    python discover_site.py --park "Killbear" --include-sites
+
 Usage:
-    # Discover all parks (intercepts the park list API call):
-    python check_availability_playwright.py --list-parks
-
-    # Discover campgrounds in a park:
-    python check_availability_playwright.py --park "Killbear" --list-campgrounds
-
-    # Check availability for a specific campground + date range:
-    python check_availability_playwright.py --park "Killbear" --campground "Lighthouse Point B" \
-        --start 2026-07-19 --end 2026-08-01
+    # Check all sites in a campground:
+    python check_availability_playwright.py --park "Killbear" \
+        --campground "Lighthouse Point B" --start 2026-07-19 --end 2026-08-01
 
     # Check a specific site:
-    python check_availability_playwright.py --park "Killbear" --campground "Lighthouse Point B" \
-        --site 1422 --start 2026-07-19 --end 2026-08-01
+    python check_availability_playwright.py --park "Killbear" \
+        --campground "Lighthouse Point B" --site 1422 \
+        --start 2026-07-19 --end 2026-08-01
 
-    # Run headed (visible browser window) for debugging:
-    python check_availability_playwright.py --headed --park "Killbear" --list-campgrounds
+    # List what's cached:
+    python check_availability_playwright.py --list-parks
+    python check_availability_playwright.py --park "Killbear" --list-campgrounds
 
-    # Output as JSON:
-    python check_availability_playwright.py --park "Killbear" --list-campgrounds --json
+    # Run headed (visible browser) for debugging:
+    python check_availability_playwright.py --headed --park "Killbear" \
+        --campground "Lighthouse Point B" --start 2026-07-19 --end 2026-08-01
+
+    # Force live discovery instead of cache:
+    python check_availability_playwright.py --no-cache --park "Killbear" \
+        --list-campgrounds
 """
 
 import argparse
 import json
-import re
+import os
 import sys
 import time
 from datetime import datetime
@@ -46,7 +51,6 @@ try:
 except ImportError:
     print(
         "Error: 'playwright' is required.\n"
-        "Install with:\n"
         "  pip install playwright\n"
         "  playwright install chromium",
         file=sys.stderr,
@@ -58,40 +62,89 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 SITE_URL = "https://reservations.ontarioparks.ca"
-DEFAULT_TIMEOUT = 30_000  # 30 seconds for page loads
-API_INTERCEPT_TIMEOUT = 15_000  # 15 seconds to wait for API responses
+DEFAULT_TIMEOUT = 30_000
+API_WAIT_MS = 15_000
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CACHE_FILE = os.path.join(SCRIPT_DIR, "site_structure.json")
 
 # Default search parameters (tent camping, 2 people)
 DEFAULT_EQUIPMENT_ID = -32768
 DEFAULT_SUB_EQUIPMENT_ID = -32768
 DEFAULT_PARTY_SIZE = 2
-DEFAULT_BOOKING_CATEGORY_ID = 0
 
 
 # ---------------------------------------------------------------------------
-# URL builder — construct direct booking URLs from known IDs
+# Cache: load saved IDs from site_structure.json
 # ---------------------------------------------------------------------------
 
-def build_search_url(transaction_location_id, resource_location_id, map_id,
-                     start_date, end_date, equipment_id=DEFAULT_EQUIPMENT_ID,
-                     sub_equipment_id=DEFAULT_SUB_EQUIPMENT_ID,
-                     party_size=DEFAULT_PARTY_SIZE,
-                     booking_category_id=DEFAULT_BOOKING_CATEGORY_ID):
-    """Build a direct URL to the Ontario Parks booking results page."""
+def load_cache(cache_file=CACHE_FILE):
+    """Load the cached site structure JSON. Returns None if missing."""
+    if not os.path.exists(cache_file):
+        return None
+    try:
+        with open(cache_file, "r") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return None
+
+
+def find_park_in_cache(cache, park_name):
+    """Find a park by partial name match in the cache."""
+    if not cache:
+        return None
+    name_lower = park_name.lower()
+    matches = [p for p in cache.get("parks", [])
+               if name_lower in p["name"].lower()]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        print(f"Multiple parks match '{park_name}':", file=sys.stderr)
+        for m in matches:
+            print(f"  - {m['name']}", file=sys.stderr)
+        sys.exit(1)
+    return None
+
+
+def find_campground_in_cache(park, campground_name):
+    """Find a campground by partial name match in cached park data."""
+    campgrounds = park.get("campgrounds", [])
+    if not campgrounds:
+        return None
+    name_lower = campground_name.lower()
+    matches = [c for c in campgrounds if name_lower in c["name"].lower()]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        print(f"Multiple campgrounds match '{campground_name}':", file=sys.stderr)
+        for m in matches:
+            print(f"  - {m['name']}", file=sys.stderr)
+        sys.exit(1)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# URL builder
+# ---------------------------------------------------------------------------
+
+def build_search_url(park, map_id, start_date, end_date,
+                     party_size=DEFAULT_PARTY_SIZE):
+    """Build a direct URL to the booking results page from cached IDs."""
     nights = (datetime.strptime(end_date, "%Y-%m-%d") -
               datetime.strptime(start_date, "%Y-%m-%d")).days
     params = {
-        "transactionLocationId": transaction_location_id,
-        "resourceLocationId": resource_location_id,
+        "transactionLocationId": park.get("transactionLocationId",
+                                           park["resourceLocationId"]),
+        "resourceLocationId": park["resourceLocationId"],
         "mapId": map_id,
         "searchTabGroupId": 0,
-        "bookingCategoryId": booking_category_id,
+        "bookingCategoryId": park.get("bookingCategoryId", 0),
         "startDate": start_date,
         "endDate": end_date,
         "nights": nights,
         "isReserving": "true",
-        "equipmentId": equipment_id,
-        "subEquipmentId": sub_equipment_id,
+        "equipmentId": DEFAULT_EQUIPMENT_ID,
+        "subEquipmentId": DEFAULT_SUB_EQUIPMENT_ID,
         "peopleCapacityCategoryCounts": json.dumps([
             [DEFAULT_EQUIPMENT_ID, None, party_size, None]
         ]),
@@ -102,146 +155,13 @@ def build_search_url(transaction_location_id, resource_location_id, map_id,
 
 
 # ---------------------------------------------------------------------------
-# API response interceptors
+# Browser helpers
 # ---------------------------------------------------------------------------
 
-class ApiCapture:
-    """Captures API responses intercepted from the browser's network traffic."""
-
-    def __init__(self):
-        self.parks = []             # from /api/resourcelocation/rootmaps
-        self.campgrounds = []       # from /api/resourcelocation/resources
-        self.sites = []             # from /api/resourcelocation/resources (site-level)
-        self.availability = {}      # from /api/availability/* endpoints
-        self.map_data = {}          # from /api/availability/map
-        self.raw_responses = {}     # all captured API responses keyed by URL path
-
-    def handle_response(self, response):
-        """Playwright response handler — captures API JSON responses."""
-        url = response.url
-        if "/api/" not in url:
-            return
-
-        # Only process successful JSON responses
-        if response.status != 200:
-            return
-
-        try:
-            data = response.json()
-        except Exception:
-            return
-
-        # Store raw response keyed by API path
-        path = urlparse(url).path
-        self.raw_responses[path] = data
-
-        # Parse specific endpoints
-        if "/api/resourcelocation/rootmaps" in url:
-            self._parse_parks(data)
-        elif "/api/resourcelocation/resources" in url:
-            self._parse_resources(data)
-        elif "/api/availability/map" in url:
-            self._parse_map_availability(data)
-        elif "/api/availability/resourcestatus" in url:
-            self._parse_resource_status(url, data)
-        elif "/api/availability/resourcedailyavailability" in url:
-            self._parse_daily_availability(url, data)
-
-    def _parse_parks(self, data):
-        """Parse the rootmaps response into a park list."""
-        if not isinstance(data, list):
-            return
-        self.parks = []
-        for item in data:
-            name = "Unknown"
-            localized = item.get("localizedValues", [])
-            if localized:
-                name = localized[0].get("name", "Unknown")
-            park_id = item.get("resourceLocationId") or item.get("mapId")
-            self.parks.append({
-                "name": name,
-                "resourceLocationId": item.get("resourceLocationId"),
-                "mapId": item.get("mapId"),
-                "transactionLocationId": item.get("transactionLocationId"),
-                "bookingCategoryId": item.get("bookingCategoryId", 0),
-                "raw": item,
-            })
-        self.parks.sort(key=lambda p: p["name"])
-
-    def _parse_resources(self, data):
-        """Parse the resources response (campgrounds or sites)."""
-        resources = []
-        if isinstance(data, dict):
-            for key, val in data.items():
-                if val is None:
-                    continue
-                localized = val.get("localizedValues", [])
-                name = localized[0].get("name", key) if localized else key
-                resources.append({
-                    "name": name,
-                    "id": key,
-                    "resourceLocationId": val.get("resourceLocationId"),
-                    "mapId": val.get("mapId"),
-                    "raw": val,
-                })
-        elif isinstance(data, list):
-            for item in data:
-                localized = item.get("localizedValues", [])
-                name = localized[0].get("name", "Unknown") if localized else "Unknown"
-                item_id = (item.get("resourceLocationId")
-                           or item.get("mapId")
-                           or item.get("id"))
-                resources.append({
-                    "name": name,
-                    "id": item_id,
-                    "resourceLocationId": item.get("resourceLocationId"),
-                    "mapId": item.get("mapId"),
-                    "raw": item,
-                })
-        resources.sort(key=lambda r: r["name"])
-
-        # Heuristic: if resources have sub-maps, they're campgrounds;
-        # if they're leaf nodes, they're sites
-        if resources and resources[0].get("raw", {}).get("mapId"):
-            self.campgrounds = resources
-        else:
-            self.sites = resources
-
-    def _parse_map_availability(self, data):
-        """Parse map availability response."""
-        self.map_data = data
-
-    def _parse_resource_status(self, url, data):
-        """Parse single resource status response."""
-        qs = parse_qs(urlparse(url).query)
-        resource_id = qs.get("resourceId", [None])[0]
-        if resource_id:
-            self.availability[resource_id] = {
-                "available": data.get("availabilityType", -1) == 0,
-                "availability_type": data.get("availabilityType", -1),
-                "raw": data,
-            }
-
-    def _parse_daily_availability(self, url, data):
-        """Parse daily availability response."""
-        qs = parse_qs(urlparse(url).query)
-        resource_id = qs.get("resourceId", [None])[0]
-        if resource_id:
-            self.availability.setdefault(resource_id, {})
-            self.availability[resource_id]["daily"] = data
-
-
-# ---------------------------------------------------------------------------
-# Browser automation
-# ---------------------------------------------------------------------------
-
-def create_browser(playwright, headed=False):
-    """Launch a browser instance with realistic settings."""
-    browser = playwright.chromium.launch(
+def create_browser(pw, headed=False):
+    browser = pw.chromium.launch(
         headless=not headed,
-        args=[
-            "--disable-blink-features=AutomationControlled",
-        ],
+        args=["--disable-blink-features=AutomationControlled"],
     )
     context = browser.new_context(
         viewport={"width": 1280, "height": 800},
@@ -255,236 +175,161 @@ def create_browser(playwright, headed=False):
     return browser, context
 
 
-def discover_parks(headed=False, timeout=DEFAULT_TIMEOUT):
-    """
-    Navigate to the home page and intercept the parks API call.
+def wait_for_condition(page, check_fn, timeout_ms=API_WAIT_MS):
+    """Wait until check_fn() returns True or timeout."""
+    deadline = time.time() + timeout_ms / 1000
+    while not check_fn() and time.time() < deadline:
+        page.wait_for_timeout(500)
+    return check_fn()
 
-    The SPA loads the park list to populate the search dropdown.
-    We capture that response to get all park IDs.
-    """
-    with sync_playwright() as pw:
-        browser, context = create_browser(pw, headed)
-        capture = ApiCapture()
-        page = context.new_page()
-        page.on("response", capture.handle_response)
 
-        print("Navigating to Ontario Parks home page...", file=sys.stderr)
-        page.goto(SITE_URL, timeout=timeout, wait_until="domcontentloaded")
+# ---------------------------------------------------------------------------
+# Live discovery fallback (when cache is missing)
+# ---------------------------------------------------------------------------
 
-        # Wait for the park list API call, or timeout
-        print("Waiting for park data to load...", file=sys.stderr)
-        deadline = time.time() + API_INTERCEPT_TIMEOUT / 1000
-        while not capture.parks and time.time() < deadline:
-            page.wait_for_timeout(500)
+def live_discover_parks(page):
+    """Capture parks from the rootmaps API when the home page loads."""
+    parks = []
 
-        if not capture.parks:
-            # Try triggering the search form to force the API call
-            print("Park list not auto-loaded, trying to trigger search form...",
-                  file=sys.stderr)
+    def on_response(response):
+        if "/api/resourcelocation/rootmaps" in response.url and response.status == 200:
             try:
-                # Click on the search/park selector to trigger data load
-                page.click("text=Search", timeout=5000)
+                data = response.json()
+                for item in data:
+                    localized = item.get("localizedValues", [])
+                    name = localized[0].get("name", "Unknown") if localized else "Unknown"
+                    parks.append({
+                        "name": name,
+                        "transactionLocationId": item.get("transactionLocationId"),
+                        "resourceLocationId": item.get("resourceLocationId"),
+                        "mapId": item.get("mapId"),
+                        "bookingCategoryId": item.get("bookingCategoryId", 0),
+                    })
             except Exception:
                 pass
-            page.wait_for_timeout(3000)
 
-        if not capture.parks:
-            # Last resort: check all captured API responses
-            print("Checking all intercepted API responses...", file=sys.stderr)
-            for path, data in capture.raw_responses.items():
-                print(f"  Captured: {path}", file=sys.stderr)
-
-        browser.close()
-        return capture.parks
+    page.on("response", on_response)
+    page.goto(SITE_URL, timeout=DEFAULT_TIMEOUT, wait_until="domcontentloaded")
+    wait_for_condition(page, lambda: len(parks) > 0)
+    page.remove_listener("response", on_response)
+    parks.sort(key=lambda p: p["name"])
+    return parks
 
 
-def discover_campgrounds(park_name, headed=False, timeout=DEFAULT_TIMEOUT):
-    """
-    Search for a park and intercept campground data.
+def live_discover_campgrounds(page, park):
+    """Navigate to a park page and capture campgrounds from the resources API."""
+    campgrounds = []
 
-    Strategy: Navigate to home page, use the search form to select the park,
-    then capture the resulting page's API calls for campground data.
-    """
-    with sync_playwright() as pw:
-        browser, context = create_browser(pw, headed)
-        capture = ApiCapture()
-        page = context.new_page()
-        page.on("response", capture.handle_response)
+    def on_response(response):
+        if "/api/resourcelocation/resources" in response.url and response.status == 200:
+            try:
+                data = response.json()
+                if isinstance(data, dict):
+                    for key, val in data.items():
+                        if val is None:
+                            continue
+                        localized = val.get("localizedValues", [])
+                        name = localized[0].get("name", key) if localized else key
+                        campgrounds.append({
+                            "name": name,
+                            "mapId": val.get("mapId"),
+                            "id": key,
+                        })
+            except Exception:
+                pass
 
-        # Step 1: Load home page and wait for parks to load
-        print("Loading home page...", file=sys.stderr)
-        page.goto(SITE_URL, timeout=timeout, wait_until="domcontentloaded")
-
-        deadline = time.time() + API_INTERCEPT_TIMEOUT / 1000
-        while not capture.parks and time.time() < deadline:
-            page.wait_for_timeout(500)
-
-        # Step 2: Find the matching park
-        park_name_lower = park_name.lower()
-        matches = [p for p in capture.parks
-                   if park_name_lower in p["name"].lower()]
-
-        if not matches:
-            print(f"No park found matching '{park_name}'.", file=sys.stderr)
-            if capture.parks:
-                print("Available parks:", file=sys.stderr)
-                for p in capture.parks[:20]:
-                    print(f"  - {p['name']}", file=sys.stderr)
-            browser.close()
-            return None, []
-
-        if len(matches) > 1:
-            print(f"Multiple parks match '{park_name}':", file=sys.stderr)
-            for m in matches:
-                print(f"  - {m['name']}", file=sys.stderr)
-            browser.close()
-            return None, []
-
-        park = matches[0]
-        print(f"Found park: {park['name']}", file=sys.stderr)
-
-        # Step 3: Navigate to the park's booking page to get campgrounds
-        # We need to construct a search URL or interact with the form
-        # Try clicking the park in the search dropdown
-        try:
-            # Type the park name into the search input
-            search_input = page.locator(
-                "input[placeholder*='park' i], "
-                "input[placeholder*='search' i], "
-                "input[placeholder*='location' i], "
-                "input[aria-label*='park' i], "
-                "input[aria-label*='location' i]"
-            ).first
-            search_input.click(timeout=5000)
-            search_input.fill(park_name, timeout=5000)
-            page.wait_for_timeout(1000)
-
-            # Click the matching suggestion
-            suggestion = page.locator(
-                f"text=/{re.escape(park['name'])}/i"
-            ).first
-            suggestion.click(timeout=5000)
-            page.wait_for_timeout(2000)
-        except Exception as e:
-            print(f"Could not interact with search form: {e}", file=sys.stderr)
-            print("Trying direct URL navigation...", file=sys.stderr)
-
-        # Step 4: If we have park IDs, navigate directly to the park results
-        if park.get("resourceLocationId") and park.get("mapId"):
-            # Use a dummy date range just to see campground structure
-            dummy_start = "2026-07-01"
-            dummy_end = "2026-07-02"
-            direct_url = build_search_url(
-                transaction_location_id=park.get("transactionLocationId",
-                                                  park["resourceLocationId"]),
-                resource_location_id=park["resourceLocationId"],
-                map_id=park["mapId"],
-                start_date=dummy_start,
-                end_date=dummy_end,
-            )
-            print(f"Navigating to park results page...", file=sys.stderr)
-            capture.campgrounds = []  # reset
-            page.goto(direct_url, timeout=timeout, wait_until="domcontentloaded")
-
-            # Wait for campground data
-            deadline = time.time() + API_INTERCEPT_TIMEOUT / 1000
-            while not capture.campgrounds and time.time() < deadline:
-                page.wait_for_timeout(500)
-
-        browser.close()
-        return park, capture.campgrounds
+    url = build_search_url(park, park["mapId"], "2026-07-01", "2026-07-02")
+    page.on("response", on_response)
+    page.goto(url, timeout=DEFAULT_TIMEOUT, wait_until="domcontentloaded")
+    wait_for_condition(page, lambda: len(campgrounds) > 0)
+    page.remove_listener("response", on_response)
+    campgrounds.sort(key=lambda c: c["name"])
+    return campgrounds
 
 
-def check_availability(park_name, campground_name, start_date, end_date,
+# ---------------------------------------------------------------------------
+# Availability checking
+# ---------------------------------------------------------------------------
+
+def check_availability(park, campground, start_date, end_date,
                        site_filter=None, headed=False, timeout=DEFAULT_TIMEOUT):
     """
-    Full flow: find park → find campground → navigate to campground →
-    intercept availability data.
+    Navigate to a campground page and check availability for all (or one) sites.
+
+    Uses cached IDs from site_structure.json to navigate directly.
+    Falls back to page.evaluate() API calls for per-site availability.
     """
+    cg_map_id = campground.get("mapId") or campground.get("id")
+    cached_sites = campground.get("sites", [])
+
     with sync_playwright() as pw:
         browser, context = create_browser(pw, headed)
-        capture = ApiCapture()
         page = context.new_page()
-        page.on("response", capture.handle_response)
 
-        # Step 1: Load home page to discover park IDs
-        print("Loading Ontario Parks...", file=sys.stderr)
-        page.goto(SITE_URL, timeout=timeout, wait_until="domcontentloaded")
-
-        deadline = time.time() + API_INTERCEPT_TIMEOUT / 1000
-        while not capture.parks and time.time() < deadline:
-            page.wait_for_timeout(500)
-
-        # Step 2: Find the park
-        park_name_lower = park_name.lower()
-        matches = [p for p in capture.parks
-                   if park_name_lower in p["name"].lower()]
-        if not matches:
-            print(f"No park found matching '{park_name}'.", file=sys.stderr)
-            browser.close()
-            return None
-        park = matches[0]
-        print(f"Park: {park['name']}", file=sys.stderr)
-
-        # Step 3: Navigate to park results page
-        park_url = build_search_url(
-            transaction_location_id=park.get("transactionLocationId",
-                                              park["resourceLocationId"]),
-            resource_location_id=park["resourceLocationId"],
-            map_id=park["mapId"],
-            start_date=start_date,
-            end_date=end_date,
-        )
-        print("Loading park results...", file=sys.stderr)
-        capture.campgrounds = []
-        page.goto(park_url, timeout=timeout, wait_until="domcontentloaded")
-
-        deadline = time.time() + API_INTERCEPT_TIMEOUT / 1000
-        while not capture.campgrounds and time.time() < deadline:
-            page.wait_for_timeout(500)
-
-        # Step 4: Find the campground
-        cg_name_lower = campground_name.lower()
-        cg_matches = [c for c in capture.campgrounds
-                      if cg_name_lower in c["name"].lower()]
-        if not cg_matches:
-            print(f"No campground matching '{campground_name}'.", file=sys.stderr)
-            if capture.campgrounds:
-                print("Available campgrounds:", file=sys.stderr)
-                for c in capture.campgrounds:
-                    print(f"  - {c['name']}", file=sys.stderr)
-            browser.close()
-            return None
-        campground = cg_matches[0]
-        print(f"Campground: {campground['name']}", file=sys.stderr)
-
-        # Step 5: Navigate to the campground map to trigger site/availability load
-        cg_map_id = campground.get("mapId") or campground.get("id")
-        cg_url = build_search_url(
-            transaction_location_id=park.get("transactionLocationId",
-                                              park["resourceLocationId"]),
-            resource_location_id=park["resourceLocationId"],
-            map_id=cg_map_id,
-            start_date=start_date,
-            end_date=end_date,
-        )
-        print("Loading campground map...", file=sys.stderr)
-        capture.sites = []
-        capture.availability = {}
+        # Navigate to the campground page to establish a session
+        cg_url = build_search_url(park, cg_map_id, start_date, end_date)
+        print(f"Loading {campground['name']}...", file=sys.stderr)
         page.goto(cg_url, timeout=timeout, wait_until="domcontentloaded")
 
-        # Wait for site data and availability to load
-        print("Waiting for availability data...", file=sys.stderr)
-        deadline = time.time() + API_INTERCEPT_TIMEOUT / 1000
-        while time.time() < deadline:
-            page.wait_for_timeout(500)
-            # Check if we have site data AND some availability data
-            if capture.sites and (capture.map_data or capture.availability):
-                # Give a bit more time for remaining responses
-                page.wait_for_timeout(2000)
-                break
+        # Wait for the page to settle (Angular SPA needs time to bootstrap)
+        page.wait_for_timeout(3000)
 
-        # Step 6: If we got map availability data, use it
+        # If we don't have cached sites, discover them now via page.evaluate
+        sites = cached_sites
+        if not sites:
+            print("No cached sites — discovering via API...", file=sys.stderr)
+            try:
+                data = page.evaluate(
+                    """async (mapId) => {
+                        const resp = await fetch(
+                            `/api/resourcelocation/resources?resourceLocationId=${mapId}`
+                        );
+                        return await resp.json();
+                    }""",
+                    cg_map_id,
+                )
+                if isinstance(data, dict):
+                    for key, val in data.items():
+                        if val is None:
+                            continue
+                        localized = val.get("localizedValues", [])
+                        name = localized[0].get("name", key) if localized else key
+                        sites.append({"name": name, "id": key})
+                elif isinstance(data, list):
+                    for item in data:
+                        localized = item.get("localizedValues", [])
+                        name = localized[0].get("name", "Unknown") if localized else "Unknown"
+                        site_id = (item.get("resourceLocationId")
+                                   or item.get("mapId")
+                                   or item.get("id"))
+                        sites.append({"name": name, "id": site_id})
+            except Exception as e:
+                print(f"Error discovering sites: {e}", file=sys.stderr)
+
+        if not sites:
+            print("No sites found.", file=sys.stderr)
+            browser.close()
+            return None
+
+        # Filter to specific site if requested
+        if site_filter:
+            site_filter_str = str(site_filter)
+            filtered = [s for s in sites
+                        if s["name"] == site_filter_str
+                        or site_filter_str in s["name"]]
+            if not filtered:
+                print(f"Site '{site_filter}' not found. Available sites:",
+                      file=sys.stderr)
+                for s in sorted(sites, key=lambda x: x["name"]):
+                    print(f"  - {s['name']}", file=sys.stderr)
+                browser.close()
+                return None
+            sites = filtered
+
+        # Check availability for each site using page.evaluate
+        # This runs fetch() from within the browser's origin context
+        print(f"Checking availability for {len(sites)} site(s)...", file=sys.stderr)
+
         results = {
             "park": park["name"],
             "campground": campground["name"],
@@ -493,84 +338,55 @@ def check_availability(park_name, campground_name, start_date, end_date,
             "sites": [],
         }
 
-        if capture.map_data:
-            print(f"Got map availability data.", file=sys.stderr)
-            results["map_data"] = capture.map_data
+        # Batch the checks in JavaScript for speed
+        batch_size = 20
+        for batch_start in range(0, len(sites), batch_size):
+            batch = sites[batch_start:batch_start + batch_size]
+            site_ids = [s["id"] for s in batch]
 
-        if capture.sites:
-            print(f"Found {len(capture.sites)} sites.", file=sys.stderr)
-            for site in capture.sites:
-                site_info = {
+            try:
+                batch_results = page.evaluate(
+                    """async ([siteIds, startDate, endDate]) => {
+                        const results = {};
+                        for (const id of siteIds) {
+                            try {
+                                const resp = await fetch(
+                                    `/api/availability/resourcestatus` +
+                                    `?resourceId=${id}` +
+                                    `&startDate=${startDate}` +
+                                    `&endDate=${endDate}`
+                                );
+                                results[id] = await resp.json();
+                            } catch (e) {
+                                results[id] = {error: e.message};
+                            }
+                            // Small delay to be polite
+                            await new Promise(r => setTimeout(r, 200));
+                        }
+                        return results;
+                    }""",
+                    [site_ids, start_date, end_date],
+                )
+            except Exception as e:
+                print(f"  Batch error: {e}", file=sys.stderr)
+                batch_results = {}
+
+            for site in batch:
+                site_result = batch_results.get(str(site["id"]),
+                                                 batch_results.get(site["id"], {}))
+                avail_type = site_result.get("availabilityType", -1)
+                results["sites"].append({
                     "name": site["name"],
                     "id": site["id"],
-                }
-                # Check if we have availability for this site
-                if site["id"] in capture.availability:
-                    avail = capture.availability[site["id"]]
-                    site_info["available"] = avail.get("available")
-                    site_info["availability_type"] = avail.get("availability_type")
-                results["sites"].append(site_info)
+                    "available": avail_type == 0,
+                    "availability_type": avail_type,
+                })
 
-        # Step 7: If we need per-site availability and didn't get it from
-        # the map endpoint, request it for each site (or just the filtered one)
-        sites_to_check = results["sites"]
-        if site_filter:
-            site_filter_str = str(site_filter)
-            sites_to_check = [
-                s for s in sites_to_check
-                if s["name"] == site_filter_str or site_filter_str in s["name"]
-            ]
-            if not sites_to_check:
-                print(f"Site '{site_filter}' not found.", file=sys.stderr)
-                print("Available sites:", file=sys.stderr)
-                for s in results["sites"][:20]:
-                    print(f"  - {s['name']}", file=sys.stderr)
-                browser.close()
-                return results
-
-        # For sites without availability data, fetch it via the page's JS context
-        sites_needing_check = [
-            s for s in sites_to_check if "available" not in s
-        ]
-        if sites_needing_check:
-            print(f"Fetching availability for {len(sites_needing_check)} site(s)...",
-                  file=sys.stderr)
-            for i, site in enumerate(sites_needing_check):
-                try:
-                    # Use page.evaluate to make fetch() calls from within
-                    # the page's origin — same as the browser console script
-                    avail_data = page.evaluate(
-                        """async ([resourceId, startDate, endDate]) => {
-                            const resp = await fetch(
-                                `/api/availability/resourcestatus` +
-                                `?resourceId=${resourceId}` +
-                                `&startDate=${startDate}` +
-                                `&endDate=${endDate}`
-                            );
-                            return await resp.json();
-                        }""",
-                        [site["id"], start_date, end_date],
-                    )
-                    site["available"] = avail_data.get("availabilityType", -1) == 0
-                    site["availability_type"] = avail_data.get("availabilityType", -1)
-                except Exception as e:
-                    print(f"  Error checking site {site['name']}: {e}",
-                          file=sys.stderr)
-                    site["available"] = None
-
-                if (i + 1) % 10 == 0 or i == len(sites_needing_check) - 1:
-                    print(f"  Checked {i + 1}/{len(sites_needing_check)}...",
-                          file=sys.stderr)
+            checked = min(batch_start + batch_size, len(sites))
+            print(f"  Checked {checked}/{len(sites)} sites...", file=sys.stderr)
 
         browser.close()
-
-        # Filter results if site_filter was specified
-        if site_filter:
-            results["sites"] = sites_to_check
-
         return results
-
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -579,33 +395,38 @@ def check_availability(park_name, campground_name, start_date, end_date,
 
 def print_parks(parks, as_json=False):
     if as_json:
-        print(json.dumps([
-            {"name": p["name"],
-             "resourceLocationId": p["resourceLocationId"],
-             "mapId": p["mapId"],
-             "transactionLocationId": p.get("transactionLocationId")}
-            for p in parks
-        ], indent=2))
+        out = [{"name": p["name"],
+                "resourceLocationId": p.get("resourceLocationId"),
+                "mapId": p.get("mapId"),
+                "transactionLocationId": p.get("transactionLocationId"),
+                "has_campgrounds": "campgrounds" in p}
+               for p in parks]
+        print(json.dumps(out, indent=2))
     else:
-        print(f"\n{'Park Name':<50} {'ResourceLocationId':<20} {'MapId'}")
-        print("-" * 90)
+        print(f"\n{'Park Name':<50} {'ResourceLocationId':<20} {'MapId':<15} {'Cached'}")
+        print("-" * 95)
         for p in parks:
-            print(f"{p['name']:<50} {str(p['resourceLocationId']):<20} {p['mapId']}")
+            cached = "yes" if "campgrounds" in p else ""
+            print(f"{p['name']:<50} "
+                  f"{str(p.get('resourceLocationId', '')):<20} "
+                  f"{str(p.get('mapId', '')):<15} "
+                  f"{cached}")
 
 
 def print_campgrounds(campgrounds, as_json=False):
     if as_json:
-        print(json.dumps([
-            {"name": c["name"], "id": c["id"],
-             "mapId": c.get("mapId")}
-            for c in campgrounds
-        ], indent=2))
+        out = [{"name": c["name"],
+                "mapId": c.get("mapId"),
+                "site_count": len(c.get("sites", []))}
+               for c in campgrounds]
+        print(json.dumps(out, indent=2))
     else:
-        print(f"\n{'Campground Name':<50} {'ID / MapId'}")
-        print("-" * 70)
+        print(f"\n{'Campground Name':<50} {'MapId':<20} {'Sites Cached'}")
+        print("-" * 80)
         for c in campgrounds:
-            display_id = c.get("mapId") or c.get("id")
-            print(f"{c['name']:<50} {display_id}")
+            site_count = len(c.get("sites", []))
+            sites_str = str(site_count) if site_count else "not cached"
+            print(f"{c['name']:<50} {str(c.get('mapId', '')):<20} {sites_str}")
 
 
 def print_availability(results, as_json=False):
@@ -614,28 +435,18 @@ def print_availability(results, as_json=False):
         return
 
     if as_json:
-        # Clean out raw data for JSON output
-        clean = {
-            "park": results["park"],
-            "campground": results["campground"],
-            "start_date": results["start_date"],
-            "end_date": results["end_date"],
-            "sites": [
-                {k: v for k, v in s.items() if k != "raw"}
-                for s in results["sites"]
-            ],
-        }
-        print(json.dumps(clean, indent=2))
+        print(json.dumps(results, indent=2))
         return
 
     print(f"\n{'='*60}")
-    print(f"  {results['park']} — {results['campground']}")
+    print(f"  {results['park']} -- {results['campground']}")
     print(f"  {results['start_date']} to {results['end_date']}")
     print(f"{'='*60}")
 
     available = [s for s in results["sites"] if s.get("available") is True]
     unavailable = [s for s in results["sites"] if s.get("available") is False]
-    unknown = [s for s in results["sites"] if s.get("available") is None]
+    unknown = [s for s in results["sites"]
+               if s.get("available") is None or s.get("availability_type", -1) == -1]
 
     if available:
         print(f"\n  AVAILABLE ({len(available)} sites):")
@@ -651,7 +462,7 @@ def print_availability(results, as_json=False):
 
     if unknown:
         print(f"\n  COULD NOT CHECK ({len(unknown)} sites):")
-        for s in sorted(unknown, key=lambda x: x["name"])[:5]:
+        for s in unknown[:5]:
             print(f"    Site {s['name']}")
 
     total = len(results["sites"])
@@ -666,19 +477,19 @@ def print_availability(results, as_json=False):
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Check Ontario Parks campsite availability using browser automation.\n"
-            "Navigates the real site with Playwright to bypass API restrictions."
+            "Check Ontario Parks availability using browser automation.\n"
+            "Uses cached IDs from site_structure.json (run discover_site.py first)."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--list-parks", action="store_true",
-                        help="Discover all parks and their IDs")
+                        help="List all parks (from cache or live)")
     parser.add_argument("--list-campgrounds", action="store_true",
-                        help="List campgrounds in a park (requires --park)")
+                        help="List campgrounds in a park")
     parser.add_argument("--park", type=str,
-                        help="Park name (partial match, e.g. 'Killbear')")
+                        help="Park name (partial match)")
     parser.add_argument("--campground", type=str,
-                        help="Campground name (partial match, e.g. 'Lighthouse Point B')")
+                        help="Campground name (partial match)")
     parser.add_argument("--site", type=str,
                         help="Specific site name/number (e.g. '1422')")
     parser.add_argument("--start", type=str,
@@ -686,55 +497,111 @@ def main():
     parser.add_argument("--end", type=str,
                         help="End date (YYYY-MM-DD)")
     parser.add_argument("--headed", action="store_true",
-                        help="Run with visible browser window (for debugging)")
+                        help="Run with visible browser (for debugging)")
     parser.add_argument("--json", action="store_true",
                         help="Output results as JSON")
+    parser.add_argument("--no-cache", action="store_true",
+                        help="Skip cache, discover live from the site")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT,
                         help=f"Page load timeout in ms (default: {DEFAULT_TIMEOUT})")
     args = parser.parse_args()
 
+    # Load cache
+    cache = None if args.no_cache else load_cache()
+    if cache:
+        print(f"Using cached data from {CACHE_FILE} "
+              f"(discovered {cache.get('discovered_at', 'unknown')})",
+              file=sys.stderr)
+    else:
+        print("No cache found — will discover live from the site.", file=sys.stderr)
+
     # --- List parks ---
     if args.list_parks:
-        parks = discover_parks(headed=args.headed, timeout=args.timeout)
-        if parks:
-            print_parks(parks, as_json=args.json)
+        if cache:
+            print_parks(cache["parks"], as_json=args.json)
         else:
-            print("Could not discover parks. Try --headed to debug.",
+            with sync_playwright() as pw:
+                browser, context = create_browser(pw, args.headed)
+                page = context.new_page()
+                parks = live_discover_parks(page)
+                browser.close()
+                if parks:
+                    print_parks(parks, as_json=args.json)
+                else:
+                    print("Could not discover parks. Try --headed.", file=sys.stderr)
+                    sys.exit(1)
+        return
+
+    # --- Need a park from here on ---
+    if not args.park:
+        parser.print_help()
+        sys.exit(1)
+
+    # Resolve park
+    park = None
+    if cache:
+        park = find_park_in_cache(cache, args.park)
+    if not park:
+        if cache and not args.no_cache:
+            print(f"Park '{args.park}' not in cache. Run: "
+                  f"python discover_site.py --park \"{args.park}\"",
                   file=sys.stderr)
             sys.exit(1)
-        return
+        # Live discovery
+        with sync_playwright() as pw:
+            browser, context = create_browser(pw, args.headed)
+            page = context.new_page()
+            parks = live_discover_parks(page)
+            name_lower = args.park.lower()
+            matches = [p for p in parks if name_lower in p["name"].lower()]
+            if not matches:
+                print(f"No park matching '{args.park}'.", file=sys.stderr)
+                browser.close()
+                sys.exit(1)
+            park = matches[0]
+            # Also discover campgrounds while we have the browser open
+            campgrounds = live_discover_campgrounds(page, park)
+            park["campgrounds"] = campgrounds
+            browser.close()
+
+    print(f"Park: {park['name']}", file=sys.stderr)
 
     # --- List campgrounds ---
     if args.list_campgrounds:
-        if not args.park:
-            print("--list-campgrounds requires --park", file=sys.stderr)
-            sys.exit(1)
-        park, campgrounds = discover_campgrounds(
-            args.park, headed=args.headed, timeout=args.timeout)
+        campgrounds = park.get("campgrounds", [])
         if campgrounds:
-            print(f"Park: {park['name']}")
             print_campgrounds(campgrounds, as_json=args.json)
         else:
-            print("Could not discover campgrounds. Try --headed to debug.",
+            print(f"No campgrounds cached for {park['name']}. Run: "
+                  f"python discover_site.py --park \"{park['name']}\"",
                   file=sys.stderr)
             sys.exit(1)
         return
 
     # --- Availability check ---
-    if not args.park or not args.campground:
-        print("Availability check requires --park and --campground.",
-              file=sys.stderr)
-        parser.print_help()
+    if not args.campground:
+        print("--campground is required for availability checks.", file=sys.stderr)
+        sys.exit(1)
+    if not args.start or not args.end:
+        print("--start and --end dates are required.", file=sys.stderr)
         sys.exit(1)
 
-    if not args.start or not args.end:
-        print("Availability check requires --start and --end dates.",
+    campground = find_campground_in_cache(park, args.campground)
+    if not campground:
+        print(f"Campground '{args.campground}' not found in {park['name']}.",
               file=sys.stderr)
+        campgrounds = park.get("campgrounds", [])
+        if campgrounds:
+            print("Available campgrounds:", file=sys.stderr)
+            for c in campgrounds:
+                print(f"  - {c['name']}", file=sys.stderr)
         sys.exit(1)
+
+    print(f"Campground: {campground['name']}", file=sys.stderr)
 
     results = check_availability(
-        park_name=args.park,
-        campground_name=args.campground,
+        park=park,
+        campground=campground,
         start_date=args.start,
         end_date=args.end,
         site_filter=args.site,

@@ -8,11 +8,14 @@ Tools for checking campsite availability on Ontario Parks (reservations.ontariop
 
 ```
 campground_booking_engine/
-├── CLAUDE.md                            # This file — project context for AI assistants
-├── check_availability.py                # Python CLI (direct HTTP — may be blocked by WAF)
-├── check_availability_playwright.py     # Python CLI using Playwright browser automation
-├── check_availability_browser.js        # Browser console script (paste into DevTools)
-└── requirements.txt                     # Python dependencies
+├── CLAUDE.md                                  # This file — project context for AI assistants
+├── discover_site.py                           # Step 1: discover park/campground/site IDs → JSON
+├── site_structure.json                        # Cached IDs (created by discover_site.py, gitignored)
+├── check_availability_playwright.py           # Step 2: check availability using cached IDs
+├── check_availability.py                      # Legacy: direct HTTP (may be blocked by WAF)
+├── check_availability_browser.js              # Browser console script (paste into DevTools)
+├── discover_site_structure_navigation.md      # Reusable methodology for reverse-engineering sites
+└── requirements.txt                           # Python dependencies
 ```
 
 ## How to Run
@@ -37,22 +40,28 @@ python check_availability.py --park "Killbear" --campground "Lighthouse Point B"
     --start 2026-07-01 --end 2026-07-05
 ```
 
-### Playwright Browser Automation (`check_availability_playwright.py`)
+### Recommended: Two-Step Workflow (Playwright)
 
-Uses a real browser (headed or headless) to navigate the site and intercept API
-responses. This bypasses WAF/cookie/JS-challenge blocks that prevent direct HTTP.
+**Step 1: Discover IDs** (run once, saves to `site_structure.json`):
 
 ```bash
 pip install -r requirements.txt
 playwright install chromium
 
-# Discover all parks and their IDs:
-python check_availability_playwright.py --list-parks
+# Discover all parks:
+python discover_site.py
 
-# List campgrounds in a park:
-python check_availability_playwright.py --park "Killbear" --list-campgrounds
+# Discover campgrounds + site IDs for Killbear:
+python discover_site.py --park "Killbear" --include-sites
 
-# Check availability for a campground + date range:
+# Discover everything for all parks (slow):
+python discover_site.py --all --include-sites
+```
+
+**Step 2: Check availability** (uses cached IDs, fast):
+
+```bash
+# Check all sites in a campground:
 python check_availability_playwright.py --park "Killbear" \
     --campground "Lighthouse Point B" --start 2026-07-19 --end 2026-08-01
 
@@ -61,8 +70,13 @@ python check_availability_playwright.py --park "Killbear" \
     --campground "Lighthouse Point B" --site 1422 \
     --start 2026-07-19 --end 2026-08-01
 
-# Run with visible browser for debugging:
-python check_availability_playwright.py --headed --list-parks
+# List cached parks/campgrounds:
+python check_availability_playwright.py --list-parks
+python check_availability_playwright.py --park "Killbear" --list-campgrounds
+
+# Run headed for debugging:
+python check_availability_playwright.py --headed --park "Killbear" \
+    --campground "Lighthouse Point B" --start 2026-07-19 --end 2026-08-01
 ```
 
 ### Browser Console Script (`check_availability_browser.js`)
