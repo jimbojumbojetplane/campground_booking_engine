@@ -2,27 +2,90 @@
 
 ## Project Overview
 
-This is a campground booking engine — a system for managing campground reservations, site availability, and related booking workflows. The repository is currently in its initial state with no application code yet committed.
+Tools for checking campsite availability on Ontario Parks (reservations.ontarioparks.ca). The Ontario Parks reservation system does not offer a public API — these scripts work by calling internal endpoints discovered via browser network inspection.
 
-## Repository Status
+## Repository Structure
 
-**Status:** New / empty repository — no application framework, dependencies, or source code have been added yet.
+```
+campground_booking_engine/
+├── CLAUDE.md                       # This file — project context for AI assistants
+├── check_availability.py           # Python CLI tool for availability checking
+├── check_availability_browser.js   # Browser console script (paste into DevTools)
+└── requirements.txt                # Python dependencies
+```
 
-When the project is bootstrapped, update this file with:
-- Chosen language and framework
-- Directory structure
-- Build and run commands
-- Test commands and conventions
-- Database setup instructions
-- Environment variable requirements
+## How to Run
+
+### Python CLI (`check_availability.py`)
+
+```bash
+pip install -r requirements.txt
+
+# List all parks:
+python check_availability.py --list-parks
+
+# List campgrounds in a park:
+python check_availability.py --park "Killbear" --list-campgrounds
+
+# Check a specific site:
+python check_availability.py --park "Killbear" --campground "Lighthouse Point B" \
+    --site 1422 --start 2026-07-01 --end 2026-07-05
+
+# Find all available sites in a campground:
+python check_availability.py --park "Killbear" --campground "Lighthouse Point B" \
+    --start 2026-07-01 --end 2026-07-05
+```
+
+### Browser Console Script (`check_availability_browser.js`)
+
+1. Navigate to reservations.ontarioparks.ca
+2. Search for your park/campground with desired dates
+3. Get to the campground MAP view
+4. Open browser DevTools (F12) → Console tab
+5. Paste the script and press Enter
+
+## Key Technical Details
+
+### Ontario Parks API Endpoints (Undocumented)
+
+These are internal endpoints — they may change without notice:
+
+- `GET /api/resourcelocation/rootmaps` — List all parks
+- `GET /api/resourcelocation/resources?resourceLocationId={id}` — List sites in a campground
+- `GET /api/attribute/filterable` — Site attribute definitions
+- `GET /api/availability/resourcestatus?resourceId={id}&startDate={date}&endDate={date}` — Check single site availability (availabilityType == 0 means available)
+- `GET /api/availability/resourcedailyavailability?resourceId={id}&startDate={date}&endDate={date}` — Day-by-day availability
+- `POST /api/availability/map` — Map-based availability data
+
+### ID Format
+
+Park and campground IDs use large negative integers (e.g., `-2147483467`). These appear to be based on 32-bit integer ranges.
+
+### URL Structure
+
+Direct booking URLs follow this pattern:
+```
+https://reservations.ontarioparks.ca/create-booking/results?resourceLocationId={id}&mapId={id}&bookingCategoryId={id}&startDate=YYYY-MM-DD&endDate=YYYY-MM-DD&isReserving=true&partySize=1
+```
+
+### Known Limitations
+
+- The API is not officially public and may block requests or change endpoints at any time.
+- Browser console script works within the site's origin, avoiding CORS issues.
+- Python script requires browser-like User-Agent headers to work.
+- Rate limiting may apply — avoid hammering the API.
+
+## Dependencies
+
+- Python 3.7+
+- `requests` library
 
 ## Development Guidelines for AI Assistants
 
 ### General Principles
-- Read existing code before modifying it. Never propose changes to files you haven't read.
-- Keep changes minimal and focused on what was requested. Avoid over-engineering.
-- Do not add features, refactoring, or "improvements" beyond what was asked.
-- Prefer editing existing files over creating new ones.
+- Read existing code before modifying it.
+- Keep changes minimal and focused on what was requested.
+- Do not add features or "improvements" beyond what was asked.
 
 ### Git Workflow
 - Use clear, descriptive commit messages.
@@ -30,15 +93,6 @@ When the project is bootstrapped, update this file with:
 - Work on feature branches as directed.
 
 ### Code Quality
-- Follow the conventions already established in the codebase (once code exists).
-- Do not introduce security vulnerabilities (SQL injection, XSS, command injection, etc.).
-- Write tests for new functionality when a test framework is in place.
-- Do not add comments, docstrings, or type annotations to code you did not change.
-
-### When Bootstrapping This Project
-If asked to set up the initial project, confirm the following with the user before proceeding:
-1. Language and framework (e.g., Python/Django, Node/Express, Ruby/Rails)
-2. Database choice (e.g., PostgreSQL, MySQL, SQLite)
-3. Authentication approach
-4. Frontend requirements (API-only, server-rendered, SPA)
-5. Deployment target (Docker, cloud platform, etc.)
+- Follow existing conventions in the codebase.
+- Do not introduce security vulnerabilities.
+- Avoid storing credentials or API keys in source files.
