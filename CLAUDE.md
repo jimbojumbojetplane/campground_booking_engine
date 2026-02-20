@@ -8,10 +8,11 @@ Tools for checking campsite availability on Ontario Parks (reservations.ontariop
 
 ```
 campground_booking_engine/
-├── CLAUDE.md                       # This file — project context for AI assistants
-├── check_availability.py           # Python CLI tool for availability checking
-├── check_availability_browser.js   # Browser console script (paste into DevTools)
-└── requirements.txt                # Python dependencies
+├── CLAUDE.md                            # This file — project context for AI assistants
+├── check_availability.py                # Python CLI (direct HTTP — may be blocked by WAF)
+├── check_availability_playwright.py     # Python CLI using Playwright browser automation
+├── check_availability_browser.js        # Browser console script (paste into DevTools)
+└── requirements.txt                     # Python dependencies
 ```
 
 ## How to Run
@@ -36,6 +37,34 @@ python check_availability.py --park "Killbear" --campground "Lighthouse Point B"
     --start 2026-07-01 --end 2026-07-05
 ```
 
+### Playwright Browser Automation (`check_availability_playwright.py`)
+
+Uses a real browser (headed or headless) to navigate the site and intercept API
+responses. This bypasses WAF/cookie/JS-challenge blocks that prevent direct HTTP.
+
+```bash
+pip install -r requirements.txt
+playwright install chromium
+
+# Discover all parks and their IDs:
+python check_availability_playwright.py --list-parks
+
+# List campgrounds in a park:
+python check_availability_playwright.py --park "Killbear" --list-campgrounds
+
+# Check availability for a campground + date range:
+python check_availability_playwright.py --park "Killbear" \
+    --campground "Lighthouse Point B" --start 2026-07-19 --end 2026-08-01
+
+# Check a specific site:
+python check_availability_playwright.py --park "Killbear" \
+    --campground "Lighthouse Point B" --site 1422 \
+    --start 2026-07-19 --end 2026-08-01
+
+# Run with visible browser for debugging:
+python check_availability_playwright.py --headed --list-parks
+```
+
 ### Browser Console Script (`check_availability_browser.js`)
 
 1. Navigate to reservations.ontarioparks.ca
@@ -57,28 +86,63 @@ These are internal endpoints — they may change without notice:
 - `GET /api/availability/resourcedailyavailability?resourceId={id}&startDate={date}&endDate={date}` — Day-by-day availability
 - `POST /api/availability/map` — Map-based availability data
 
-### ID Format
+### Site Architecture
 
-Park and campground IDs use large negative integers (e.g., `-2147483467`). These appear to be based on 32-bit integer ranges.
+The site is a **Single Page Application (SPA)** powered by the **Aspira** platform
+(formerly CamIS). All booking views share the route `/create-booking/results` — map,
+list, and calendar views are client-side toggles with the same URL. Availability data
+is loaded via JS `fetch()` calls after page load, not server-rendered in HTML.
+
+The site returns **403 to direct HTTP requests** — it requires JavaScript execution
+to pass a cookie/challenge gate. This is why the Playwright approach is needed.
+
+### ID Hierarchy
+
+IDs use large negative 32-bit integers. The navigation hierarchy is:
+
+```
+transactionLocationId   (park billing entity, e.g. -2147483596 for Killbear)
+└─ resourceLocationId   (park resource root, e.g. -2147483600 for Killbear)
+   └─ mapId             (park-level map, e.g. -2147483428 — shows campground areas)
+      └─ mapId          (campground map, e.g. -2147483419 — Lighthouse Point B)
+         └─ site IDs    (individual campsites, e.g. "1422")
+```
 
 ### URL Structure
 
-Direct booking URLs follow this pattern:
+Full booking results URL with all parameters:
 ```
-https://reservations.ontarioparks.ca/create-booking/results?resourceLocationId={id}&mapId={id}&bookingCategoryId={id}&startDate=YYYY-MM-DD&endDate=YYYY-MM-DD&isReserving=true&partySize=1
+https://reservations.ontarioparks.ca/create-booking/results?
+  transactionLocationId={id}
+  &resourceLocationId={id}
+  &mapId={id}                          # changes when drilling into campgrounds
+  &searchTabGroupId=0
+  &bookingCategoryId=0                 # 0 = camping
+  &startDate=YYYY-MM-DD
+  &endDate=YYYY-MM-DD
+  &nights={n}
+  &isReserving=true
+  &equipmentId=-32768                  # -32768 = tent
+  &subEquipmentId=-32768               # -32768 = single tent
+  &peopleCapacityCategoryCounts=[[-32768,null,{partySize},null]]
+  &searchTime={ISO timestamp}
+  &flexibleSearch=[false,false,"YYYY-MM-01",1]
+  &filterData={...}                    # attribute filters, added when drilling down
 ```
 
 ### Known Limitations
 
 - The API is not officially public and may block requests or change endpoints at any time.
-- Browser console script works within the site's origin, avoiding CORS issues.
-- Python script requires browser-like User-Agent headers to work.
+- Direct HTTP requests return 403 — browser automation (Playwright) or the browser console script are required.
+- Browser console script works within the site's origin, avoiding CORS/cookie issues.
 - Rate limiting may apply — avoid hammering the API.
+- The site uses Queue-it virtual waiting rooms during peak reservation periods.
 
 ## Dependencies
 
 - Python 3.7+
-- `requests` library
+- `requests` library (for `check_availability.py`)
+- `playwright` library + Chromium (for `check_availability_playwright.py`)
 
 ## Development Guidelines for AI Assistants
 
