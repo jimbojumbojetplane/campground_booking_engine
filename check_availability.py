@@ -44,17 +44,21 @@ except ImportError:
 # Configuration
 # ---------------------------------------------------------------------------
 
-BASE_URL = "https://reservations.ontarioparks.ca"
+# The user-facing site is reservations.ontarioparks.ca but the API backend
+# that community scripts have successfully called from Python uses .com.
+# If .com stops working, try switching to .ca.
+API_BASE = "https://reservations.ontarioparks.com"
+SITE_URL = "https://reservations.ontarioparks.ca"  # for booking links
 
 API_ENDPOINTS = {
-    "root_maps": f"{BASE_URL}/api/resourcelocation/rootmaps",
-    "sub_maps": f"{BASE_URL}/api/resourcelocation/resources",
-    "resource_location": f"{BASE_URL}/api/resourceLocation",
-    "attributes": f"{BASE_URL}/api/attribute/filterable",
-    "map_data": f"{BASE_URL}/api/availability/map",
-    "resource_status": f"{BASE_URL}/api/availability/resourcestatus",
-    "resource_details": f"{BASE_URL}/api/resource/details",
-    "daily_availability": f"{BASE_URL}/api/availability/resourcedailyavailability",
+    "root_maps": f"{API_BASE}/api/resourcelocation/rootmaps",
+    "sub_maps": f"{API_BASE}/api/resourcelocation/resources",
+    "resource_location": f"{API_BASE}/api/resourceLocation",
+    "attributes": f"{API_BASE}/api/attribute/filterable",
+    "map_data": f"{API_BASE}/api/availability/map",
+    "resource_status": f"{API_BASE}/api/availability/resourcestatus",
+    "resource_details": f"{API_BASE}/api/resource/details",
+    "daily_availability": f"{API_BASE}/api/availability/resourcedailyavailability",
 }
 
 HEADERS = {
@@ -66,8 +70,8 @@ HEADERS = {
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
     "Content-Type": "application/json",
-    "Referer": f"{BASE_URL}/",
-    "Origin": BASE_URL,
+    "Referer": f"{SITE_URL}/",
+    "Origin": SITE_URL,
 }
 
 
@@ -81,14 +85,42 @@ session.headers.update(HEADERS)
 
 def api_get(url, params=None):
     """Make a GET request to the Ontario Parks API."""
-    resp = session.get(url, params=params, timeout=30)
+    try:
+        resp = session.get(url, params=params, timeout=30)
+    except requests.exceptions.ProxyError:
+        print(
+            "Error: Connection blocked by proxy. This script must be run from a network\n"
+            "that can reach reservations.ontarioparks.com directly (e.g. your local\n"
+            "machine, not a sandboxed/cloud environment).\n"
+            "If using a corporate proxy, you may need to configure HTTP_PROXY/HTTPS_PROXY\n"
+            "or try: --base-url https://reservations.ontarioparks.ca",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    except requests.exceptions.ConnectionError as e:
+        print(f"Error: Could not connect to Ontario Parks: {e}", file=sys.stderr)
+        sys.exit(1)
     resp.raise_for_status()
     return resp.json()
 
 
 def api_post(url, payload):
     """Make a POST request to the Ontario Parks API."""
-    resp = session.post(url, json=payload, timeout=30)
+    try:
+        resp = session.post(url, json=payload, timeout=30)
+    except requests.exceptions.ProxyError:
+        print(
+            "Error: Connection blocked by proxy. This script must be run from a network\n"
+            "that can reach reservations.ontarioparks.com directly (e.g. your local\n"
+            "machine, not a sandboxed/cloud environment).\n"
+            "If using a corporate proxy, you may need to configure HTTP_PROXY/HTTPS_PROXY\n"
+            "or try: --base-url https://reservations.ontarioparks.ca",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    except requests.exceptions.ConnectionError as e:
+        print(f"Error: Could not connect to Ontario Parks: {e}", file=sys.stderr)
+        sys.exit(1)
     resp.raise_for_status()
     return resp.json()
 
@@ -266,7 +298,7 @@ def build_reservation_url(resource_location_id, map_id, start_date, end_date,
         "filterData": "{}",
         "searchTime": datetime.utcnow().isoformat(),
     }
-    return f"{BASE_URL}/create-booking/results?{urlencode(params)}"
+    return f"{SITE_URL}/create-booking/results?{urlencode(params)}"
 
 
 # ---------------------------------------------------------------------------
@@ -299,7 +331,27 @@ def main():
                         help="End date (YYYY-MM-DD)")
     parser.add_argument("--json", action="store_true",
                         help="Output results as JSON")
+    parser.add_argument("--base-url", type=str, default=None,
+                        help="Override API base URL (default: reservations.ontarioparks.com). "
+                             "Try .ca if .com stops working.")
     args = parser.parse_args()
+
+    # Allow overriding the API base URL
+    if args.base_url:
+        global API_BASE, SITE_URL, API_ENDPOINTS
+        API_BASE = args.base_url.rstrip("/")
+        SITE_URL = API_BASE
+        API_ENDPOINTS = {
+            "root_maps": f"{API_BASE}/api/resourcelocation/rootmaps",
+            "sub_maps": f"{API_BASE}/api/resourcelocation/resources",
+            "resource_location": f"{API_BASE}/api/resourceLocation",
+            "attributes": f"{API_BASE}/api/attribute/filterable",
+            "map_data": f"{API_BASE}/api/availability/map",
+            "resource_status": f"{API_BASE}/api/availability/resourcestatus",
+            "resource_details": f"{API_BASE}/api/resource/details",
+            "daily_availability": f"{API_BASE}/api/availability/resourcedailyavailability",
+        }
+        session.headers.update({"Referer": f"{API_BASE}/", "Origin": API_BASE})
 
     # --- List parks ---
     if args.list_parks:
@@ -403,7 +455,7 @@ def main():
             status = "AVAILABLE" if result["available"] else "NOT AVAILABLE"
             print(f"\n  Site {site['name']}: {status}")
             if result["available"]:
-                print(f"  Book at: {BASE_URL}")
+                print(f"  Book at: {SITE_URL}")
         return
 
     # --- Check all sites in campground ---
